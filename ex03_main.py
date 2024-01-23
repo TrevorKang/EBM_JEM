@@ -1,6 +1,7 @@
 ## Standard libraries
 import os
 import numpy as np
+import random
 import tqdm
 import pandas as pd
 import argparse
@@ -44,7 +45,7 @@ def parse_args():
                         help='path to directory where model checkpoints are stored')
     parser.add_argument('--batch_size', type=int, default=32,
                         help='input batch size for training (default: 32)')
-    parser.add_argument('--num_epochs', type=int, default=120,
+    parser.add_argument('--num_epochs', type=int, default=20,
                         help='number of epochs to train (default: 120)')
     parser.add_argument('--cbuffer_size', type=int, default=128,
                         help='num. images per class in the sampling reservoir (default: 128)')
@@ -82,7 +83,9 @@ class MCMCSampler:
         self.sample_size = sample_size
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
-
+        self.buffers = [(torch.rand((1, ) + self.img_shape) * 2 - 1) for _ in range(self.cbuffer_size)]
+        self.soft = torch.nn.Softmax(dim=1)
+        
     def synthesize_samples(self, clabel=None, steps=60, step_size=10, return_img_per_step=False):
         """
         Synthesize images from the current parameterized q_\theta
@@ -119,29 +122,65 @@ class MCMCSampler:
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
 
-        inp_imgs = None  # corresponds to the initial sample(s) x^0
+        for _ in range(100): # 20% of the images are sampled from Gaussian noise
+            num_imgs_gaussian=np.random.binomial(self.sample_size, 0.2)
+            if num_imgs_gaussian !=0:
+                break  
+        num_imgs_reservoir = self.sample_size - num_imgs_gaussian  # the rest is sampled from the buffer
+        gaussian_img = torch.randn((num_imgs_gaussian,) + self.img_shape) * 2 - 1
+        reservoir_img = torch.cat(random.choices(self.buffers, k=num_imgs_reservoir), dim=0)
+
+        inp_imgs = torch.cat([gaussian_img, reservoir_img], dim=0).detach().to(torch.device('cuda:0'))  # corresponds to the initial sample(s) x^0
         inp_imgs.requires_grad = True
+
+        # for JEM
+        # clabel : [class label, class label, ...] # batch_size
+        rand_labels = (torch.multinomial(torch.tensor(clabel).float(), num_samples=num_imgs_gaussian, replacement=True)).to(torch.device('cuda:0'))
+        old_labels = torch.argmax(self.soft(self.model.get_logits(inp_imgs)), dim=1)
+        clabel = torch.cat([rand_labels, old_labels], dim=0).detach()
 
         # List for storing generations at each step
         imgs_per_step = []
+
+        noise = torch.randn(inp_imgs.shape, device = inp_imgs.device) # Brownian noise
 
         # Execute K MCMC steps
         for _ in range(steps):
             # (1) Add small noise to the input 'inp_imgs' (which are normalized to a range of -1 to 1).
             # This corresponds to the Brownian noise that allows to explore the entire parameter space.
+            noise.normal_(0, 0.005)
+            inp_imgs.data.add_(noise.data)
+            inp_imgs.data.clamp_(-1, 1)
 
+            # sample y
+            if clabel is not None:
+                prob = self.soft(self.model.get_logits(inp_imgs.clone().detach()))
+                inp_labs = torch.multinomial(prob, num_samples=1, replacement=False)
+            
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
             # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
+            if inp_labs == None:
+                out_imgs = -self.model(inp_imgs)
+            else:
+                out_imgs = -self.model.get_logits(inp_imgs).gather(1, inp_labs.view(-1, 1))
+
+            out_imgs.sum().backward()
+            inp_imgs.grad.data.clamp_(-0.03, 0.03)  # for stability reasons, we clip the gradients to a small range
 
             # (3) Perform gradient ascent to regions of higher probability
             # (gradient descent if we consider the energy surface!). You can use the parameter 'step_size' which can be
             # considered the learning rate of the SGLD update.
+            inp_imgs.data.add_(-step_size * inp_imgs.grad.data)
+            inp_imgs.grad.detach_()
+            inp_imgs.grad.zero_()
+            inp_imgs.data.clamp_(-1, 1)
 
             # (4) Optional: save (detached) intermediate images in the imgs_per_step variable
             if return_img_per_step:
-                pass
+                imgs_per_step.append(inp_imgs.clone().detach())
 
+        # reactivate the gradients for parameters for training
         for p in self.model.parameters():
             p.requires_grad = True
         self.model.train(is_training)

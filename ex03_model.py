@@ -33,10 +33,19 @@ class ShallowCNN(nn.Module):
 
     def get_logits(self, x):
         # TODO (3.2): Implement classification procedure that outputs the logits across the classes
-        pass
+        x = self.cnn_layers(x)
+        x = nn.AdaptiveAvgPool2d((1, 1))(x)
+        x = self.fc_layers(x)
+        return x
 
     def forward(self, x, y=None) -> torch.Tensor:
         # TODO (3.2): Implement forward function for (1) EBM, (2) Unconditional JEM, (3) Conditional JEM.
         #  Consider using F.adaptive_avg_pool2d to convert between the 2D features and a linear representation.
         #  (You can also reuse your implementation of 'self.get_logits(x)' if this helps you.)
-        pass
+        if y is None:
+            # EBM or unconditional JEM
+            return torch.logsumexp(self.get_logits(x), dim=1)
+        else:
+            # Conditional JEM
+            y_logits = torch.gather(self.get_logits(x), 1, y.unsqueeze(1))
+            return torch.exp(y_logits)
