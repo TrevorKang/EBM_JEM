@@ -6,7 +6,7 @@ from torchvision import transforms
 from pathlib import Path
 from typing import Union, Dict, List, Tuple
 
-
+# FOR GET THE DATASET
 class TransformTensorDataset(data.Dataset):
     """
     TensorDataset with support of transforms.

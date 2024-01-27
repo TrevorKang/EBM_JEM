@@ -43,7 +43,7 @@ class ShallowCNN(nn.Module):
         #  Consider using F.adaptive_avg_pool2d to convert between the 2D features and a linear representation.
         #  (You can also reuse your implementation of 'self.get_logits(x)' if this helps you.)
         if y is None:
-            # EBM or unconditional JEM
+            # EBM or unconditional JEM: LOG-SUM-EXP
             return torch.logsumexp(self.get_logits(x), dim=1)
         else:
             # Conditional JEM
