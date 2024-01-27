@@ -87,6 +87,7 @@ class MCMCSampler:
         self.max_len = 1024
         self.soft = torch.nn.Softmax(dim=1)
 
+        # Buffers for cond/uncond sampling
         self.buffers_uncond = [(torch.rand((1,) + self.img_shape) * 2 - 1) for _ in range(self.cbuffer_size)]
         self.buffers_cond = {i: [(torch.rand((1,) + self.img_shape) * 2 - 1) for _ in range(self.cbuffer_size)] for i in range(self.num_classes)}
 
@@ -127,8 +128,8 @@ class MCMCSampler:
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
         num_imgs_gaussian = 0
         for _ in range(100): # 20% of the images are sampled from Gaussian noise
-            num_imgs_gaussian=np.random.binomial(self.sample_size, 0.2)
-            if num_imgs_gaussian !=0:
+            num_imgs_gaussian = np.random.binomial(self.sample_size, 0.2)
+            if num_imgs_gaussian != 0:
                 break
         num_imgs_reservoir = self.sample_size - num_imgs_gaussian  # the rest is sampled from the buffer
         # gaussian_img = torch.randn((num_imgs_gaussian,) + self.img_shape) * 2 - 1
@@ -414,7 +415,7 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
     """
     model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
-    pl.seed_everything(42)
+    pl.seed_everything(25)
 
     def gen_imgs(model, clabel=None, step_size=10, batch_size=24, num_steps=256):
         model.eval()
@@ -428,7 +429,7 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
     k = 8
     bs = 8
     num_steps = 256
-    conditional_labels = [1, 4, 5, 10, 17, 18, 39, 23]
+    conditional_labels = [1, 3, 5, 11, 17, 18, 42, 23]
 
     synth_imgs = []
     for label in tqdm.tqdm(conditional_labels):
@@ -474,7 +475,7 @@ def run_evaluation(args, ckpt_path: Union[str, Path]):
     """
     model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
-    pl.seed_everything(42)
+    pl.seed_everything(25)
 
     # Datasets & Dataloaders
     batch_size = args.batch_size
@@ -522,9 +523,34 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
 
     # TODO (3.6): Calculate and visualize the score distributions, e.g. with a histogram. Analyze whether we can
     #  visualy tell apart the different data distributions based on their assigned score.
+    # move the tensor out of the DataLoader
+    test_loader_tensor = torch.cat([x[0] for x in test_loader], dim=0)
+    ood_ta_loader_tensor = torch.cat([x[0] for x in ood_ta_loader], dim=0)
+    ood_tb_loader_tensor = torch.cat([x[0] for x in ood_tb_loader], dim=0)
+
+    scores_test_loader = score_fn(model, test_loader_tensor.to(model.device), score="py")
+    scores_ood_ta_loader = score_fn(model, ood_ta_loader_tensor.to(model.device), score="px")
+    scores_ood_tb_loader = score_fn(model, ood_tb_loader_tensor.to(model.device), score="px")
+    # histogram visualisation of the scores
+    plt.hist(scores_test_loader, bins=100, alpha=0.5, label='test')
+    plt.hist(scores_ood_ta_loader, bins=100, alpha=0.5, label='ood_ta')
+    plt.hist(scores_ood_tb_loader, bins=100, alpha=0.5, label='ood_tb')
+    plt.legend(loc='upper right')
+    plt.show()
+    plt.savefig('histogram.png')
 
     # TODO (3.6): Solve a binary classification on the soft scores and evaluate and AUROC and/or AUPRC score for
     #  discrimination between the training samples and one of the OOD distributions.
+    threshold = 0.5
+    scores_test_loader_class = [1 if x > threshold else 0 for x in scores_test_loader]
+    scores_ood_ta_loader_class = [1 if x > threshold else 0 for x in scores_ood_ta_loader]
+    scores_ood_tb_loader = [1 if x > threshold else 0 for x in scores_ood_tb_loader]
+
+    true_class = [1] * len(scores_test_loader_class) + [0] * (
+                len(scores_ood_ta_loader_class) + len(scores_ood_tb_loader))
+    predicted_class = np.concatenate((scores_test_loader_class, scores_ood_ta_loader_class, scores_ood_tb_loader))
+    roc_auc_score_eval = roc_auc_score(true_class, predicted_class)
+    print("Roc Score is: ", roc_auc_score_eval)
 
 
 if __name__ == '__main__':
@@ -533,15 +559,15 @@ if __name__ == '__main__':
     # 1) Run training
     # run_training(args)
 
-    # 2) Evaluate model
-    ckpt_path: str = "saved_models/lightning_logs/version_4/checkpoints/last_epoch=0-step=353.ckpt"
-    #
-    # # Classification performance
+    # # 2) Evaluate model
+    ckpt_path: str ="saved_models/lightning_logs/version_6/checkpoints/last_epoch=19-step=7060.ckpt"
+    # #
+    # # # Classification performance
     # run_evaluation(args, ckpt_path)
-    #
-    # # Image synthesis
-    run_generation(args, ckpt_path, conditional=True)
+    # #
+    # # # Image synthesis
+    # run_generation(args, ckpt_path, conditional=True)
     # run_generation(args, ckpt_path, conditional=False)
     #
     # # OOD Analysis
-    # run_ood_analysis(args, ckpt_path)
+    run_ood_analysis(args, ckpt_path)
