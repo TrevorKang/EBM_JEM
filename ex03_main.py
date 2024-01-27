@@ -83,9 +83,13 @@ class MCMCSampler:
         self.sample_size = sample_size
         self.num_classes = num_classes
         self.cbuffer_size = cbuffer_size
-        self.buffers = [(torch.rand((1, ) + self.img_shape) * 2 - 1) for _ in range(self.cbuffer_size)]
+
+        self.max_len = 1024
         self.soft = torch.nn.Softmax(dim=1)
-        
+
+        self.buffers_uncond = [(torch.rand((1,) + self.img_shape) * 2 - 1) for _ in range(self.cbuffer_size)]
+        self.buffers_cond = {i: [(torch.rand((1,) + self.img_shape) * 2 - 1) for _ in range(self.cbuffer_size)] for i in range(self.num_classes)}
+
     def synthesize_samples(self, clabel=None, steps=60, step_size=10, return_img_per_step=False):
         """
         Synthesize images from the current parameterized q_\theta
@@ -121,23 +125,24 @@ class MCMCSampler:
         # (consider saving that into a field of this class). In this buffer, you store the synthesized samples after
         # each SGLD procedure. In the class-conditional setting, you want to have individual buffers per class.
         # Please make sure that you keep the buffer finite to not run into memory-related problems.
-
+        num_imgs_gaussian = 0
         for _ in range(100): # 20% of the images are sampled from Gaussian noise
             num_imgs_gaussian=np.random.binomial(self.sample_size, 0.2)
             if num_imgs_gaussian !=0:
-                break  
+                break
         num_imgs_reservoir = self.sample_size - num_imgs_gaussian  # the rest is sampled from the buffer
-        gaussian_img = torch.randn((num_imgs_gaussian,) + self.img_shape) * 2 - 1
-        reservoir_img = torch.cat(random.choices(self.buffers, k=num_imgs_reservoir), dim=0)
+        # gaussian_img = torch.randn((num_imgs_gaussian,) + self.img_shape) * 2 - 1
+        # reservoir_img = torch.cat(random.choices(self.buffers, k=num_imgs_reservoir), dim=0)
+
+        if clabel is not None:
+            gaussian_img = torch.randn((num_imgs_gaussian,) + self.img_shape) * 2 - 1
+            reservoir_img = torch.cat(random.choices(self.buffers_cond[clabel[0].item()], k=num_imgs_reservoir), dim=0)
+        else:
+            gaussian_img = torch.randn((num_imgs_gaussian,) + self.img_shape) * 2 - 1
+            reservoir_img = torch.cat(random.choices(self.buffers_uncond, k=num_imgs_reservoir), dim=0)
 
         inp_imgs = torch.cat([gaussian_img, reservoir_img], dim=0).detach().to(torch.device('cuda:0'))  # corresponds to the initial sample(s) x^0
         inp_imgs.requires_grad = True
-
-        # for JEM
-        # clabel : [class label, class label, ...] # batch_size
-        rand_labels = (torch.multinomial(torch.tensor(clabel).float(), num_samples=num_imgs_gaussian, replacement=True)).to(torch.device('cuda:0'))
-        old_labels = torch.argmax(self.soft(self.model.get_logits(inp_imgs)), dim=1)
-        clabel = torch.cat([rand_labels, old_labels], dim=0).detach()
 
         # List for storing generations at each step
         imgs_per_step = []
@@ -151,20 +156,12 @@ class MCMCSampler:
             noise.normal_(0, 0.005)
             inp_imgs.data.add_(noise.data)
             inp_imgs.data.clamp_(-1, 1)
-
-            # sample y
-            if clabel is not None:
-                prob = self.soft(self.model.get_logits(inp_imgs.clone().detach()))
-                inp_labs = torch.multinomial(prob, num_samples=1, replacement=False)
             
             # (2) Calculate gradient-based score function at the current step. In case of the JEM implementation AND
             # class-conditional sampling (which is optional from a methodological point of view), make sure that you
             # plug in some label information as well as we want to calculate E(x,y) and not only E(x).
-            if inp_labs == None:
-                out_imgs = -self.model(inp_imgs)
-            else:
-                out_imgs = -self.model.get_logits(inp_imgs).gather(1, inp_labs.view(-1, 1))
 
+            out_imgs = -self.model(inp_imgs)
             out_imgs.sum().backward()
             inp_imgs.grad.data.clamp_(-0.03, 0.03)  # for stability reasons, we clip the gradients to a small range
 
@@ -189,8 +186,19 @@ class MCMCSampler:
 
         if return_img_per_step:
             return torch.stack(imgs_per_step, dim=0)
+
+        # Add the synthesized images to the buffer and remove the old ones -> inplace update
+        list_input_imgs = list(inp_imgs.to(torch.device('cpu')).chunk(self.sample_size, dim=0))
+        if clabel is not None:
+            for i, label in enumerate(clabel):
+                cls = label.item()
+                self.buffers_cond[cls] = [list_input_imgs[i]] + self.buffers_cond[cls]
+                self.buffers_cond[cls] = self.buffers_cond[cls][:self.cbuffer_size]
         else:
-            return inp_imgs
+            self.buffers_uncond = list_input_imgs + self.buffers_uncond
+            self.buffers_uncond = self.buffers_uncond[:self.max_len]
+
+        return inp_imgs
 
 
 class JEM(pl.LightningModule):
@@ -260,19 +268,41 @@ class JEM(pl.LightningModule):
     def px_step(self, batch, ccond_sample=True):
         # TODO (3.4): Implement p(x) step.
         # In addition to calculating the contrastive loss, also consider using an L2 regularization loss. This allows us
-        # to constrain the Lipshitz constant by penalizes too large energies and makes sure that the energiers maintain
+        # to constrain the Lipshitz constant by penalizes too large energies and makes sure that the energies maintain
         # similar magnitudes across epochs.
         # E.g.:
         #         reg_loss = self.hparams.alpha * (real_out ** 2 + synth_out ** 2).mean()
         #         cdiv_loss = ...
         #         loss = reg_loss + cdiv_loss
-        loss = None
+        real_imgs, real_labs = batch
+        # real_imgs = real_imgs.to(self.device)
+        small_noise = torch.randn_like(real_imgs) * 0.005
+        real_imgs.add_(small_noise).clamp_(-1, 1)
+
+        if ccond_sample:
+            real_out = self.cnn(real_imgs, real_labs)
+            fake_labs = torch.randint(0, self.num_classes, (self.batch_size,))
+            fake_imgs = self.sampler.synthesize_samples(clabel=fake_labs)
+            fake_out = self.cnn(fake_imgs, fake_labs)
+        else:
+            real_out = self.cnn(real_imgs)
+            fake_imgs = self.sampler.synthesize_samples()
+            fake_out = self.cnn(fake_imgs)
+            if real_out.shape != fake_out.shape:
+                fake_out = fake_out[:real_out.shape[0]]     # for the last batch that has 26 images not 32
+
+        reg_loss = self.hparams.alpha * (real_out ** 2 + fake_out ** 2).mean()
+        cdiv_loss = (fake_out - real_out).mean()
+
+        loss = reg_loss + cdiv_loss
         return loss
 
     def pyx_step(self, batch):
         # TODO (3.4): Implement p(y|x) step.
         # Here, we want to calculate the classification loss using the class logits infered by the neural network.
-        loss = None
+        real_imgs, real_labels = batch
+        logits = self.cnn(real_imgs, real_labels)
+        loss = torch.nn.CrossEntropyLoss()(logits, real_labels)
         return loss
 
     def training_step(self, batch, batch_idx):
@@ -281,14 +311,31 @@ class JEM(pl.LightningModule):
         # Here, we specify the update equation used to tune the model parameters.
         # Ideally, we only need to call the px_step() and pyx_step() methods and combine their loss terms to build up
         # the factorized joint density loss introduced by Gratwohl et al. .
-        loss = None
+        px = self.px_step(batch, self.ccond_sample)
+        weight = 0.1        # weight higher, emphasis on classification
+        if self.ccond_sample:
+            pyx = self.pyx_step(batch)
+            loss = px + weight * pyx     # lmbd is the weight of classification loss
+        else:
+            loss = px
+        self.log('val_contrastive_divergence', loss)
         return loss
 
     def validation_step(self, batch, batch_idx, dataset_idx=None):
         # Note: batch_idx and dataset_idx not needed (just there for PyTorch
         # Lightning)
         # TODO (3.4) 
-        pass
+        with torch.set_grad_enabled(True):
+            px = self.px_step(batch, self.ccond_sample)
+            if self.ccond_sample:
+                pyx = self.pyx_step(batch)
+                # Joint density loss
+                loss = px + 0.1 * pyx
+            else:
+                loss = px
+            images, labels = batch[0], batch[1]
+            self.log('val_contrastive_divergence', loss)
+            return {'val_loss': loss}
 
 
 def run_training(args) -> pl.LightningModule:
@@ -332,8 +379,8 @@ def run_training(args) -> pl.LightningModule:
                          callbacks=[
                              ModelCheckpoint(save_weights_only=True, mode="min", monitor='val_contrastive_divergence',
                                              filename='val_condiv_{epoch}-{step}'),
-                             ModelCheckpoint(save_weights_only=True, mode="max", monitor='val_MulticlassAveragePrecision',
-                                             filename='val_mAP_{epoch}-{step}'),
+                             # ModelCheckpoint(save_weights_only=True, mode="max", monitor='val_MulticlassAveragePrecision',
+                             #                 filename='val_mAP_{epoch}-{step}'),
                              ModelCheckpoint(save_weights_only=True, filename='last_{epoch}-{step}'),
                              LearningRateMonitor("epoch")
                          ])
@@ -484,17 +531,17 @@ if __name__ == '__main__':
     args = parse_args()
 
     # 1) Run training
-    run_training(args)
+    # run_training(args)
 
     # 2) Evaluate model
-    ckpt_path: str = ""
-
-    # Classification performance
-    run_evaluation(args, ckpt_path)
-
-    # Image synthesis
+    ckpt_path: str = "saved_models/lightning_logs/version_4/checkpoints/last_epoch=0-step=353.ckpt"
+    #
+    # # Classification performance
+    # run_evaluation(args, ckpt_path)
+    #
+    # # Image synthesis
     run_generation(args, ckpt_path, conditional=True)
-    run_generation(args, ckpt_path, conditional=False)
-
-    # OOD Analysis
-    run_ood_analysis(args, ckpt_path)
+    # run_generation(args, ckpt_path, conditional=False)
+    #
+    # # OOD Analysis
+    # run_ood_analysis(args, ckpt_path)
