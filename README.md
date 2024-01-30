@@ -23,13 +23,20 @@ Final Example:
 The sampling process is shown below: _class label=7_
 ![sampling_process.PNG](sampling_process.PNG)
 ## Out-of-Distribution (OOD) Detection
+```run_ood_detection()```: 
+    OOD detection on **GLYPHS** dataset. We use two extra datasets to test the performance.
+
+```score_fn()```: 
+    score function for OOD detection. Use the negative log-likelihood ```p(x)``` as the score function.
+
+The histogram of the score function is shown below: 
 ![histogram.png](histogram.png)
 
 JEM can be used as a binary classifier: 
 
-_0_: in-distribution (**ID**): all blue bars
+```0```: in-distribution (**ID**): all blue bars
 
-_1_: out-of-distribution (**OOD**): all orange bars
+```1```: out-of-distribution (**OOD**): all orange bars
 
 after setting the threshold (**0.25**), we can use it to detect OOD.
 
