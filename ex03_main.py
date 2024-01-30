@@ -316,7 +316,7 @@ class JEM(pl.LightningModule):
         weight = 0.1        # weight higher, emphasis on classification
         if self.ccond_sample:
             pyx = self.pyx_step(batch)
-            loss = px + weight * pyx     # lmbd is the weight of classification loss
+            loss = px + weight * pyx
         else:
             loss = px
         self.log('val_contrastive_divergence', loss)
@@ -427,21 +427,22 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
         return img
 
     k = 8
-    bs = 8
+    bs = 32
     num_steps = 256
-    conditional_labels = [1, 3, 5, 11, 17, 18, 42, 23]
+    # [1:42]
+    conditional_labels = range(0, 42)
 
     synth_imgs = []
     for label in tqdm.tqdm(conditional_labels):
         clabel = (torch.ones(bs) * label).type(torch.LongTensor).to(model.device)
         generated_imgs = gen_imgs(model, clabel=clabel if conditional else None, step_size=10, batch_size=bs, num_steps=num_steps).cpu()
-        synth_imgs.append(generated_imgs[-1])
 
         # Visualize sampling process
         i = 0
         step_size = num_steps // 8
         imgs_to_plot = generated_imgs[step_size - 1::step_size, i]
         imgs_to_plot = torch.cat([generated_imgs[0:1, i], imgs_to_plot], dim=0)
+        synth_imgs.append(imgs_to_plot[-1])
         grid = torchvision.utils.make_grid(imgs_to_plot, nrow=imgs_to_plot.shape[0], normalize=True,
                                            value_range=(-1, 1), pad_value=0.5, padding=2)
         grid = grid.permute(1, 2, 0)
@@ -452,14 +453,17 @@ def run_generation(args, ckpt_path: Union[str, Path], conditional: bool = False)
                    labels=[1] + list(range(step_size, generated_imgs.shape[0] + 1, step_size)))
         plt.yticks([])
         plt.savefig(f"{'conditional' if conditional else 'unconditional'}_sample_label={label}.png")
+        plt.close()
 
     # Visualize end results
-    grid = torchvision.utils.make_grid(torch.cat(synth_imgs), nrow=k, normalize=True, value_range=(-1, 1),
+    # transfer synth_imgs to tensor
+    synth_imgs = [torch.unsqueeze(img, dim=0) for img in synth_imgs]
+    grid = torchvision.utils.make_grid(torch.cat(synth_imgs), nrow=7, normalize=True, value_range=(-1, 1),
                                        pad_value=0.5,
                                        padding=2)
     grid = grid.permute(1, 2, 0)
     grid = grid[..., 0].numpy()
-    plt.figure(figsize=(12, 24))
+    plt.figure(figsize=(18, 18))
     plt.imshow(grid, cmap='Greys')
     plt.xticks([])
     plt.yticks([])
@@ -528,7 +532,7 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     ood_ta_loader_tensor = torch.cat([x[0] for x in ood_ta_loader], dim=0)
     ood_tb_loader_tensor = torch.cat([x[0] for x in ood_tb_loader], dim=0)
 
-    scores_test_loader = score_fn(model, test_loader_tensor.to(model.device), score="py")
+    scores_test_loader = score_fn(model, test_loader_tensor.to(model.device), score="px")
     scores_ood_ta_loader = score_fn(model, ood_ta_loader_tensor.to(model.device), score="px")
     scores_ood_tb_loader = score_fn(model, ood_tb_loader_tensor.to(model.device), score="px")
     # histogram visualisation of the scores
@@ -536,19 +540,21 @@ def run_ood_analysis(args, ckpt_path: Union[str, Path]):
     plt.hist(scores_ood_ta_loader, bins=100, alpha=0.5, label='ood_ta')
     plt.hist(scores_ood_tb_loader, bins=100, alpha=0.5, label='ood_tb')
     plt.legend(loc='upper right')
-    plt.show()
+    # plt.show()
     plt.savefig('histogram.png')
 
     # TODO (3.6): Solve a binary classification on the soft scores and evaluate and AUROC and/or AUPRC score for
     #  discrimination between the training samples and one of the OOD distributions.
-    threshold = 0.5
+    # predictions: greater than the threshold -> 1, less than the threshold -> 0
+    threshold = 0.25
     scores_test_loader_class = [1 if x > threshold else 0 for x in scores_test_loader]
     scores_ood_ta_loader_class = [1 if x > threshold else 0 for x in scores_ood_ta_loader]
-    scores_ood_tb_loader = [1 if x > threshold else 0 for x in scores_ood_tb_loader]
 
-    true_class = [1] * len(scores_test_loader_class) + [0] * (
-                len(scores_ood_ta_loader_class) + len(scores_ood_tb_loader))
-    predicted_class = np.concatenate((scores_test_loader_class, scores_ood_ta_loader_class, scores_ood_tb_loader))
+    # I changed 0/1 classes definition:
+    # 0: in-distribution: all blue bars
+    # 1: out-of-distribution: all orange bars
+    true_class = [0] * len(scores_test_loader_class) + [1] * len(scores_ood_ta_loader_class)
+    predicted_class = np.concatenate((scores_test_loader_class, scores_ood_ta_loader_class))
     roc_auc_score_eval = roc_auc_score(true_class, predicted_class)
     print("Roc Score is: ", roc_auc_score_eval)
 
@@ -563,11 +569,11 @@ if __name__ == '__main__':
     ckpt_path: str ="saved_models/lightning_logs/version_6/checkpoints/last_epoch=19-step=7060.ckpt"
     # #
     # # # Classification performance
-    run_evaluation(args, ckpt_path)
+    # run_evaluation(args, ckpt_path)
     # #
     # # # Image synthesis
     # run_generation(args, ckpt_path, conditional=True)
     # run_generation(args, ckpt_path, conditional=False)
     #
     # # OOD Analysis
-    # run_ood_analysis(args, ckpt_path)
+    run_ood_analysis(args, ckpt_path)
