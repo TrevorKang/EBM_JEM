@@ -1,9 +1,6 @@
 import torch
 import pytorch_lightning as pl
 
-"""
-    NOT FINISHED YET
-"""
 def grad_norm(model: pl.LightningModule, x: torch.Tensor, y: torch.Tensor = None):
     had_gradients_enabled = torch.is_grad_enabled()
     torch.set_grad_enabled(True)
