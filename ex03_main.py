@@ -475,7 +475,7 @@ def run_evaluation(args, ckpt_path: Union[str, Path]):
     """
     model = JEM.load_from_checkpoint(ckpt_path)
     model.to(device)
-    pl.seed_everything(25)
+    pl.seed_everything(42)
 
     # Datasets & Dataloaders
     batch_size = args.batch_size
@@ -563,11 +563,11 @@ if __name__ == '__main__':
     ckpt_path: str ="saved_models/lightning_logs/version_6/checkpoints/last_epoch=19-step=7060.ckpt"
     # #
     # # # Classification performance
-    # run_evaluation(args, ckpt_path)
+    run_evaluation(args, ckpt_path)
     # #
     # # # Image synthesis
     # run_generation(args, ckpt_path, conditional=True)
     # run_generation(args, ckpt_path, conditional=False)
     #
     # # OOD Analysis
-    run_ood_analysis(args, ckpt_path)
+    # run_ood_analysis(args, ckpt_path)
