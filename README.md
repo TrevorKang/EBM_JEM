@@ -40,5 +40,5 @@ JEM can be used as a binary classifier:
 
 after setting the threshold (**0.25**), we can use it to detect OOD.
 
-Corresponding ROC score : **0.9153815771938624**
+Corresponding ROC score : ```0.9153815771938624```
 
