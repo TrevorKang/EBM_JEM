@@ -292,7 +292,7 @@ class JEM(pl.LightningModule):
             if real_out.shape != fake_out.shape:
                 fake_out = fake_out[:real_out.shape[0]]
 
-        reg_loss = self.hparams.alpha * (real_out ** 2 + fake_out ** 2).mean()
+        reg_loss = self.hparams.alpha * (real_out ** 2 + fake_out ** 2).mean()      # regularized loss
         cdiv_loss = (fake_out - real_out).mean()
 
         loss = reg_loss + cdiv_loss
