@@ -290,7 +290,7 @@ class JEM(pl.LightningModule):
             fake_imgs = self.sampler.synthesize_samples()
             fake_out = self.cnn(fake_imgs)
             if real_out.shape != fake_out.shape:
-                fake_out = fake_out[:real_out.shape[0]]     # for the last batch that has 26 images not 32
+                fake_out = fake_out[:real_out.shape[0]]
 
         reg_loss = self.hparams.alpha * (real_out ** 2 + fake_out ** 2).mean()
         cdiv_loss = (fake_out - real_out).mean()
